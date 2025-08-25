@@ -24,29 +24,29 @@ async function readBody(req) {
 
   // Jotform sends multipart/form-data and embeds a JSON blob in a part named "rawRequest"
   if (ct.includes("multipart/form-data")) {
+    // rawRequest JSON
     const m = raw.match(/name="rawRequest"\r\n\r\n([\s\S]*?)\r\n--/);
+    let rr = {};
+    let formID = undefined;
+
     if (m && m[1]) {
       try {
-        const rr = JSON.parse(m[1]);
-        // Try to derive formID from slug `submit/<id>`
-        const formID = rr?.slug?.split("/")?.pop();
-        return { rawRequest: rr, formID };
-      } catch (e) {
-        return { _multipart: raw };
-      }
+        rr = JSON.parse(m[1]);
+        formID = rr?.slug?.split("/")?.pop();
+      } catch { /* ignore */ }
     }
-    return { _multipart: raw };
+
+    // Also pull hidden fbp/fbc directly from parts if present
+    const fbpMatch = raw.match(/name="fbp"\r\n\r\n([\s\S]*?)\r\n--/);
+    const fbcMatch = raw.match(/name="fbc"\r\n\r\n([\s\S]*?)\r\n--/);
+    const fbp = fbpMatch && fbpMatch[1] ? fbpMatch[1].trim() : undefined;
+    const fbc = fbcMatch && fbcMatch[1] ? fbcMatch[1].trim() : undefined;
+
+    return { rawRequest: rr, formID, fbp, fbc };
   }
 
   // Fallback attempts
   try { return JSON.parse(raw); } catch { return parseQS(raw); }
-}
-
-function pick(obj, keys) {
-  for (const k of keys) {
-    if (obj && obj[k] != null && String(obj[k]).trim() !== "") return String(obj[k]);
-  }
-  return undefined;
 }
 
 module.exports = async (req, res) => {
@@ -59,7 +59,7 @@ module.exports = async (req, res) => {
     // If multipart from Jotform, answers live in body.rawRequest
     const rr = body.rawRequest || {};
 
-    // NEW: pick up browser IDs passed via hidden fields
+    // Browser IDs from hidden fields or rawRequest
     const fbp = rr.fbp || body.fbp;
     const fbc = rr.fbc || body.fbc;
 
@@ -67,26 +67,31 @@ module.exports = async (req, res) => {
     const email      = rr.q27_whatsYour27 || rr.email;
     const first_name = (rr.q24_whatsYour24 && rr.q24_whatsYour24.first) || rr.first_name;
     const last_name  = (rr.q24_whatsYour24 && rr.q24_whatsYour24.last)  || rr.last_name;
-    const phone      = (rr.q26_whatsYour26 && rr.q26_whatsYour26.full) ||
-                       (rr.q25_whatsYour25 && rr.q25_whatsYour25.full) || rr.phone;
-    const eventId    = rr.event_id;
 
-    // Source URL: prefer Referer; else Jotform form URL; else safe default
-    const formId = body.formID || rr.formID;
+    // Two phones: business + personal
+    const business_phone = rr.q25_whatsYour25 && rr.q25_whatsYour25.full;
+    const personal_phone = rr.q26_whatsYour26 && rr.q26_whatsYour26.full;
+    const phones = [business_phone, personal_phone].filter(Boolean);
+
+    const eventId = rr.event_id;
+
     // Always use a neutral, compliant URL instead of exposing Jotform
     const event_source_url = "https://lyftgrowth.com/go/tsgf/survey/";
 
+    const formId = body.formID || rr.formID;
 
     // Debug log (view in Vercel → Logs)
-    console.log("Jotform parsed:", { email, first_name, last_name, phone, eventId, formId, event_source_url, fbp, fbc });
+    console.log("Jotform parsed:", {
+      email, first_name, last_name, phones, eventId, formId, event_source_url, fbp, fbc
+    });
 
     const user_data = {
       em: email ? [sha256(email)] : undefined,
-      ph: phone ? [sha256(phone)] : undefined,
+      ph: phones.length ? phones.map(p => sha256(p)) : undefined,
       fn: sha256(first_name),
       ln: sha256(last_name),
-      fbp,                // NEW
-      fbc,                // NEW
+      fbp,
+      fbc,
       client_ip_address: String(req.headers["x-forwarded-for"] || "").split(",")[0] || undefined,
       client_user_agent: req.headers["user-agent"]
     };
@@ -96,7 +101,7 @@ module.exports = async (req, res) => {
       data: [{
         event_name: "Lead",
         event_time: now(),
-        event_id: eventId,           // optional dedupe id
+        event_id: eventId, // optional dedupe id
         action_source: "website",
         event_source_url,
         user_data,
@@ -111,13 +116,13 @@ module.exports = async (req, res) => {
     if (!pixelId || !accessToken) {
       return res.status(500).json({ ok: false, error: "Missing META_PIXEL_ID or META_ACCESS_TOKEN env vars" });
     }
-    
+
     console.log("Using pixel/test:", {
-        pixelId: process.env.META_PIXEL_ID,
-        testEventCode: process.env.META_TEST_EVENT_CODE
+      pixelId: process.env.META_PIXEL_ID,
+      testEventCode: process.env.META_TEST_EVENT_CODE
     });
     console.log("Payload to Meta:", JSON.stringify(payload, null, 2));
-    
+
     const fb = await fetch(`https://graph.facebook.com/v21.0/${pixelId}/events?access_token=${accessToken}`, {
       method: "POST",
       headers: { "Content-Type": "application/json" },
