@@ -73,9 +73,9 @@ module.exports = async (req, res) => {
 
     // Source URL: prefer Referer; else Jotform form URL; else safe default
     const formId = body.formID || rr.formID;
-    const event_source_url =
-      req.headers.referer ||
-      (formId ? `https://www.jotform.com/${formId}` : "https://lyftgrowth.com/lead-form");
+    // Always use a neutral, compliant URL instead of exposing Jotform
+    const event_source_url = "https://lyftgrowth.com/go/tsgf/survey/";
+
 
     // Debug log (view in Vercel → Logs)
     console.log("Jotform parsed:", { email, first_name, last_name, phone, eventId, formId, event_source_url, fbp, fbc });
