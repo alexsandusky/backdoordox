@@ -105,6 +105,11 @@ module.exports = async (req, res) => {
     if (!pixelId || !accessToken) {
       return res.status(500).json({ ok: false, error: "Missing META_PIXEL_ID or META_ACCESS_TOKEN env vars" });
     }
+    
+    console.log("Using pixel/test:", {
+        pixelId: process.env.META_PIXEL_ID,
+        testEventCode: process.env.META_TEST_EVENT_CODE
+    });
 
     const fb = await fetch(`https://graph.facebook.com/v21.0/${pixelId}/events?access_token=${accessToken}`, {
       method: "POST",
