@@ -59,9 +59,28 @@ module.exports = async (req, res) => {
     // If multipart from Jotform, answers live in body.rawRequest
     const rr = body.rawRequest || {};
 
-    // Browser IDs from hidden fields or rawRequest
-    const fbp = rr.fbp || body.fbp;
-    const fbc = rr.fbc || body.fbc;
+    // Try to get browser IDs from hidden fields…
+    let fbp = rr.fbp || body.fbp;
+    let fbc = rr.fbc || body.fbc;
+
+    // If fbc missing, reconstruct from fbclid in parentURL/referer (common in Jotform payloads)
+    if (!fbc) {
+      const parentURL = rr.parentURL || rr.referer || req.headers.referer || "";
+      try {
+    // parentURL may be encoded inside another URL (e.g., ?parentURL=<encoded>)
+      const outer = new URL(parentURL, "https://dummy.base");
+    // If parentURL itself contains an encoded URL, try to decode and parse it
+      const innerCandidate = outer.searchParams.get("parentURL");
+      const candidate = innerCandidate ? decodeURIComponent(innerCandidate) : parentURL;
+      const u = new URL(candidate, "https://dummy.base");
+      const fbclid = u.searchParams.get("fbclid");
+      if (fbclid) {
+        const ts = Math.floor(Date.now() / 1000);
+        fbc = `fb.1.${ts}.${fbclid}`;
+      }
+  } catch (_) { /* ignore parse errors */ }
+}
+
 
     // Map your current Jotform field IDs (from your log sample)
     const email      = rr.q27_whatsYour27 || rr.email;
