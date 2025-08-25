@@ -59,6 +59,10 @@ module.exports = async (req, res) => {
     // If multipart from Jotform, answers live in body.rawRequest
     const rr = body.rawRequest || {};
 
+    // NEW: pick up browser IDs passed via hidden fields
+    const fbp = rr.fbp || body.fbp;
+    const fbc = rr.fbc || body.fbc;
+
     // Map your current Jotform field IDs (from your log sample)
     const email      = rr.q27_whatsYour27 || rr.email;
     const first_name = (rr.q24_whatsYour24 && rr.q24_whatsYour24.first) || rr.first_name;
@@ -74,13 +78,15 @@ module.exports = async (req, res) => {
       (formId ? `https://www.jotform.com/${formId}` : "https://lyftgrowth.com/lead-form");
 
     // Debug log (view in Vercel → Logs)
-    console.log("Jotform parsed:", { email, first_name, last_name, phone, eventId, formId, event_source_url });
+    console.log("Jotform parsed:", { email, first_name, last_name, phone, eventId, formId, event_source_url, fbp, fbc });
 
     const user_data = {
       em: email ? [sha256(email)] : undefined,
       ph: phone ? [sha256(phone)] : undefined,
       fn: sha256(first_name),
       ln: sha256(last_name),
+      fbp,                // NEW
+      fbc,                // NEW
       client_ip_address: String(req.headers["x-forwarded-for"] || "").split(",")[0] || undefined,
       client_user_agent: req.headers["user-agent"]
     };
