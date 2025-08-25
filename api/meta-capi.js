@@ -22,27 +22,44 @@ async function readBody(req) {
   if (ct.includes("application/json")) return raw ? JSON.parse(raw) : {};
   if (ct.includes("application/x-www-form-urlencoded")) return parseQS(raw);
 
-  // Jotform sends multipart/form-data and embeds a JSON blob in a part named "rawRequest"
+  // Robust multipart parser (handles boundaries + extra headers in parts)
   if (ct.includes("multipart/form-data")) {
-    // rawRequest JSON
-    const m = raw.match(/name="rawRequest"\r\n\r\n([\s\S]*?)\r\n--/);
-    let rr = {};
-    let formID = undefined;
+    const m = ct.match(/boundary=([^;]+)/i);
+    if (!m) return { _multipart: raw }; // no boundary? return raw for debugging
+    const boundary = m[1];
+    const parts = raw.split(`--${boundary}`);
 
-    if (m && m[1]) {
-      try {
-        rr = JSON.parse(m[1]);
-        formID = rr?.slug?.split("/")?.pop();
-      } catch { /* ignore */ }
+    const fields = {};
+    for (const part of parts) {
+      if (!part || part === '--\r\n' || part === '--') continue;
+      const idx = part.indexOf('\r\n\r\n');
+      if (idx === -1) continue;
+      const headers = part.slice(0, idx);
+      let value = part.slice(idx + 4);
+      // Trim trailing CRLF and boundary dashes
+      value = value.replace(/\r\n--\s*$/, '').replace(/\r\n$/, '');
+
+      const nameMatch = headers.match(/name="([^"]+)"/i);
+      if (!nameMatch) continue;
+      const name = nameMatch[1];
+      fields[name] = value;
     }
 
-    // Also pull hidden fbp/fbc directly from parts if present
-    const fbpMatch = raw.match(/name="fbp"\r\n\r\n([\s\S]*?)\r\n--/);
-    const fbcMatch = raw.match(/name="fbc"\r\n\r\n([\s\S]*?)\r\n--/);
-    const fbp = fbpMatch && fbpMatch[1] ? fbpMatch[1].trim() : undefined;
-    const fbc = fbcMatch && fbcMatch[1] ? fbcMatch[1].trim() : undefined;
+    // Extract rawRequest JSON if present
+    let rr = {};
+    try { if (fields.rawRequest) rr = JSON.parse(fields.rawRequest); } catch {}
 
-    return { rawRequest: rr, formID, fbp, fbc };
+    // Try to derive formID from slug `submit/<id>`
+    const formID = rr?.slug?.split("/")?.pop() || fields.formID;
+
+    return {
+      rawRequest: rr,
+      formID,
+      fbp: fields.fbp,
+      fbc: fields.fbc,
+      parentURL: fields.parentURL,
+      fields // expose all (e.g., q31_fbc, q30_fbp)
+    };
   }
 
   // Fallback attempts
@@ -59,28 +76,38 @@ module.exports = async (req, res) => {
     // If multipart from Jotform, answers live in body.rawRequest
     const rr = body.rawRequest || {};
 
-    // Try to get browser IDs from hidden fields…
-    let fbp = rr.fbp || body.fbp;
-    let fbc = rr.fbc || body.fbc;
+    // Helper: pick value by exact key or Jotform's qNN_suffix pattern
+    function pickCookieLike(obj, key) {
+      if (!obj) return undefined;
+      for (const k of Object.keys(obj)) {
+        if (k === key || k.endsWith('_' + key)) {
+          const v = obj[k];
+          if (typeof v === 'string' && v.trim()) return v.trim();
+        }
+      }
+      return undefined;
+    }
+
+    // Browser IDs from hidden fields or rawRequest; accept qNN_fbp/qNN_fbc too
+    let fbp = rr.fbp || body.fbp || pickCookieLike(body.fields, 'fbp') || pickCookieLike(rr, 'fbp');
+    let fbc = rr.fbc || body.fbc || pickCookieLike(body.fields, 'fbc') || pickCookieLike(rr, 'fbc');
 
     // If fbc missing, reconstruct from fbclid in parentURL/referer (common in Jotform payloads)
     if (!fbc) {
-      const parentURL = rr.parentURL || rr.referer || req.headers.referer || "";
+      const parentURL = body.parentURL || rr.parentURL || rr.referer || req.headers.referer || "";
       try {
-    // parentURL may be encoded inside another URL (e.g., ?parentURL=<encoded>)
-      const outer = new URL(parentURL, "https://dummy.base");
-    // If parentURL itself contains an encoded URL, try to decode and parse it
-      const innerCandidate = outer.searchParams.get("parentURL");
-      const candidate = innerCandidate ? decodeURIComponent(innerCandidate) : parentURL;
-      const u = new URL(candidate, "https://dummy.base");
-      const fbclid = u.searchParams.get("fbclid");
-      if (fbclid) {
-        const ts = Math.floor(Date.now() / 1000);
-        fbc = `fb.1.${ts}.${fbclid}`;
-      }
-  } catch (_) { /* ignore parse errors */ }
-}
-
+        // parentURL may be encoded inside another URL (?parentURL=<encoded>)
+        const outer = new URL(parentURL, "https://dummy.base");
+        const innerCandidate = outer.searchParams.get("parentURL");
+        const candidate = innerCandidate ? decodeURIComponent(innerCandidate) : parentURL;
+        const u = new URL(candidate, "https://dummy.base");
+        const fbclid = u.searchParams.get("fbclid");
+        if (fbclid) {
+          const ts = Math.floor(Date.now() / 1000);
+          fbc = `fb.1.${ts}.${fbclid}`;
+        }
+      } catch { /* ignore parse errors */ }
+    }
 
     // Map your current Jotform field IDs (from your log sample)
     const email      = rr.q27_whatsYour27 || rr.email;
@@ -96,12 +123,13 @@ module.exports = async (req, res) => {
 
     // Always use a neutral, compliant URL instead of exposing Jotform
     const event_source_url = "https://lyftgrowth.com/go/tsgf/survey/";
-
     const formId = body.formID || rr.formID;
 
     // Debug log (view in Vercel → Logs)
     console.log("Jotform parsed:", {
-      email, first_name, last_name, phones, eventId, formId, event_source_url, fbp, fbc
+      email, first_name, last_name, phones, eventId, formId, event_source_url,
+      fbp, fbc,
+      fieldKeys: body.fields ? Object.keys(body.fields) : []
     });
 
     const user_data = {
@@ -149,7 +177,6 @@ module.exports = async (req, res) => {
     });
 
     const json = await fb.json();
-    // Log Meta response for quick diagnostics
     console.log("Meta CAPI response:", json);
 
     return res.status(fb.ok ? 200 : 500).json({ ok: fb.ok, meta: json });
