@@ -30,6 +30,7 @@ module.exports = async (req, res) => {
 
   try {
     const body = await readBody(req);
+    console.log("Incoming webhook body:", body);
 
     // Map common Jotform field names → normalized
     const email = pick(body, ["email","q3_email","q3_email[email]","client_email","Email"]);
