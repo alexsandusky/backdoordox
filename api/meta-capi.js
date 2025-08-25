@@ -110,7 +110,8 @@ module.exports = async (req, res) => {
         pixelId: process.env.META_PIXEL_ID,
         testEventCode: process.env.META_TEST_EVENT_CODE
     });
-
+    console.log("Payload to Meta:", JSON.stringify(payload, null, 2));
+    
     const fb = await fetch(`https://graph.facebook.com/v21.0/${pixelId}/events?access_token=${accessToken}`, {
       method: "POST",
       headers: { "Content-Type": "application/json" },
