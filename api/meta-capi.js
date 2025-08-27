@@ -141,6 +141,17 @@ module.exports = async (req, res) => {
     // ✅ CHANGED: prefer hidden field (fields.event_id), then any other casing/source
     const eventId = resolveEventId(body, rr);
 
+    console.log("EventId sources:", {
+      rr_event_id: rr.event_id,
+      rr_eventId: rr.eventId,
+      fields_event_id: pickCookieLike(body.fields, 'event_id'),
+      fields_eventId: pickCookieLike(body.fields, 'eventId'),
+      body_event_id: body.event_id,
+      body_eventId: body.eventId,
+      resolved: eventId
+    });
+
+
     // Always use a neutral, compliant URL instead of exposing Jotform
     const event_source_url = "https://lyftgrowth.com/go/tsgf/survey/";
     const formId = body.formID || rr.formID;
