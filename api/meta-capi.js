@@ -88,21 +88,20 @@ module.exports = async (req, res) => {
       return undefined;
     }
 
-    // ---- NEW: resolve the correct event_id from any payload shape
-    function resolveEventId(body, rr) {
-      // Prefer hidden field from multipart fields (e.g., event_id or qNN_event_id)
-    const fromFields =
-      pickCookieLike(body.fields, 'event_id') ||
-      pickCookieLike(body.fields, 'eventId');
-
-      // Then try rawRequest JSON (some forms put it there)
-    const fromRR = rr.event_id || rr.eventId;
-
-      // Then try top-level body (urlencoded/json)
-    const fromBody = body.event_id || body.eventId;
-
-    return fromFields || fromRR || fromBody || undefined;
+    // ---- NEW: pull hidden field `event_id` from Jotform's answers map
+function getAnswerByName(rr, target) {
+  if (!rr || !rr.answers) return undefined;
+  const want = String(target).toLowerCase();
+  for (const a of Object.values(rr.answers)) {
+    // Jotform puts name under `name`, value under `answer` (sometimes `value`)
+    const name = (a && a.name ? String(a.name).toLowerCase() : '');
+    if (name === want) {
+      return (a.answer != null ? a.answer : a.value);
     }
+  }
+  return undefined;
+}
+
 
 
     
@@ -138,8 +137,13 @@ module.exports = async (req, res) => {
     const personal_phone = rr.q26_whatsYour26 && rr.q26_whatsYour26.full;
     const phones = [business_phone, personal_phone].filter(Boolean);
 
-    // ✅ CHANGED: prefer hidden field (fields.event_id), then any other casing/source
-    const eventId = resolveEventId(body, rr);
+    // ✅ CHANGED: prefer hidden field in answers; then try fields/body; NEVER prefer rr.event_id (that's Jotform's internal)
+const eventId =
+  getAnswerByName(rr, 'event_id') ||                   // <— the real hidden field
+  pickCookieLike(body.fields, 'event_id') ||           // if Jotform sent it as a multipart field
+  body.event_id || body.eventId ||                     // urlencoded/json fallbacks
+  undefined;
+
 
     console.log("EventId sources:", {
       rr_event_id: rr.event_id,
