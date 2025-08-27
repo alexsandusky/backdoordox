@@ -89,21 +89,19 @@ module.exports = async (req, res) => {
     }
 
     function resolveEventId(body, rr) {
-  // Prefer the hidden field (qNN_event_id / fields.event_id / body.event_id) over Jotform's internal rr.event_id
-  const hidden =
-    pickCookieLike(rr, 'event_id') ||      // e.g., rawRequest.q32_event_id
-    pickCookieLike(body.fields, 'event_id') ||
-    body.event_id || body.eventId ||       // non-multipart fallbacks
-    undefined;
+      // Prefer the hidden field (qNN_event_id / fields.event_id / body.event_id)
+      // over Jotform's internal rr.event_id
+      const hidden =
+        pickCookieLike(rr, 'event_id') ||      // e.g., rawRequest.q32_event_id
+        pickCookieLike(body.fields, 'event_id') ||
+        body.event_id || body.eventId ||       // non-multipart fallbacks
+        undefined;
 
-  const internal = rr.event_id || undefined; // Jotform internal composite id
+      const internal = rr.event_id || undefined; // Jotform internal composite id
 
-  if (hidden && internal && hidden !== internal) {
-    console.warn('[CAPI] Both hidden and internal event_id present; preferring hidden.', { hidden, internal });
-  }
-  return hidden || internal || undefined;
-  }
-
+      // (Removed debug warn)
+      return hidden || internal || undefined;
+    }
 
     // Browser IDs from hidden fields or rawRequest; accept qNN_fbp/qNN_fbc too
     let fbp = rr.fbp || body.fbp || pickCookieLike(body.fields, 'fbp') || pickCookieLike(rr, 'fbp');
@@ -136,27 +134,14 @@ module.exports = async (req, res) => {
     const personal_phone = rr.q26_whatsYour26 && rr.q26_whatsYour26.full;
     const phones = [business_phone, personal_phone].filter(Boolean);
 
-    // >>> CHANGED: use resolver instead of rr.event_id
+    // Use resolver instead of rr.event_id
     const eventId = resolveEventId(body, rr);
 
     // Always use a neutral, compliant URL instead of exposing Jotform
     const event_source_url = "https://lyftgrowth.com/go/tsgf/survey/";
     const formId = body.formID || rr.formID;
 
-    // Debug log (view in Vercel → Logs)
-    const _hidden = pickCookieLike(rr, 'event_id') || pickCookieLike(body.fields, 'event_id') || body.event_id || body.eventId;
-console.log("EventId sources:", {
-  rr_event_id: rr.event_id,                   // Jotform internal
-  rr_qNN_event_id: pickCookieLike(rr, 'event_id'), // your hidden field (qNN_event_id)
-  fields_event_id: pickCookieLike(body.fields, 'event_id'),
-  body_event_id: body.event_id,
-  body_eventId: body.eventId,
-  chosen_hidden: _hidden,
-  resolved: eventId
-});
-
-
-    
+    // (Removed "EventId sources" debug log)
 
     console.log("Jotform parsed:", {
       email, first_name, last_name, phones, eventId, formId, event_source_url,
