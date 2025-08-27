@@ -1,4 +1,4 @@
-// /api/meta-capi.js — Vercel Serverless Function (plain JS)
+// /api/meta-capi.js  — Vercel Serverless Function (plain JS)
 // Handles Jotform webhook (multipart/form-data), parses rawRequest JSON,
 // maps fields, hashes PII, and sends a Meta CAPI "Lead" event.
 
@@ -12,92 +12,45 @@ function sha256(v) {
 }
 const now = () => Math.floor(Date.now() / 1000);
 
-// --- Debug helper
-const DEBUG = true;
-function dumpWebhook(body, ct, raw) {
-  if (!DEBUG) return;
-  try {
-    console.log("[WB][content-type]", ct);
-    console.log("[WB][raw first 2000]", (raw || "").slice(0, 2000));
-    console.log("[WB][body keys]", Object.keys(body || {}));
-
-    if (body.fields) {
-      console.log("[WB][fields keys]", Object.keys(body.fields));
-      console.log("[WB][fields.event_id]", body.fields.event_id);
-    }
-
-    const rr = body.rawRequest || {};
-    console.log("[WB][rawRequest keys]", Object.keys(rr || {}));
-    if (rr.answers) {
-      const names = [];
-      for (const a of Object.values(rr.answers)) {
-        if (a && a.name) names.push(a.name);
-      }
-      console.log("[WB][answers names]", names);
-      const ev = Object.values(rr.answers).find(a => a && a.name === "event_id");
-      console.log("[WB][answers.event_id]", ev ? (ev.answer ?? ev.value) : undefined);
-    }
-  } catch (e) {
-    console.log("[WB][dump error]", e.message);
-  }
-}
-
-// --- Read body (handles json, urlencoded, multipart)
+// Read any body type: JSON, x-www-form-urlencoded, or multipart/form-data (Jotform)
 async function readBody(req) {
   const chunks = [];
   for await (const ch of req) chunks.push(ch);
   const raw = Buffer.concat(chunks).toString("utf8");
+  const ct = String(req.headers["content-type"] || "");
 
-  const ctRaw = String(req.headers["content-type"] || ""); // keep original
-  const ct = ctRaw.toLowerCase();                          // for type checks
+  if (ct.includes("application/json")) return raw ? JSON.parse(raw) : {};
+  if (ct.includes("application/x-www-form-urlencoded")) return parseQS(raw);
 
-  if (ct.includes("application/json")) {
-    const obj = raw ? JSON.parse(raw) : {};
-    obj._raw = raw; obj._ct = ct;
-    return obj;
-  }
-  if (ct.includes("application/x-www-form-urlencoded")) {
-    const obj = parseQS(raw);
-    obj._raw = raw; obj._ct = ct;
-    return obj;
-  }
-
+  // Robust multipart parser (handles boundaries + extra headers in parts)
   if (ct.includes("multipart/form-data")) {
-    // IMPORTANT: extract boundary from ORIGINAL header (case-sensitive)
-    const m = ctRaw.match(/boundary=([^;]+)/i);
-    if (!m) return { _multipart: raw, _raw: raw, _ct: ct };
-
+    const m = ct.match(/boundary=([^;]+)/i);
+    if (!m) return { _multipart: raw }; // no boundary? return raw for debugging
     const boundary = m[1];
     const parts = raw.split(`--${boundary}`);
 
     const fields = {};
     for (const part of parts) {
-      if (!part || part === '--\r\n' || part === '--' || part === '\r\n') continue;
+      if (!part || part === '--\r\n' || part === '--') continue;
+      const idx = part.indexOf('\r\n\r\n');
+      if (idx === -1) continue;
+      const headers = part.slice(0, idx);
+      let value = part.slice(idx + 4);
+      // Trim trailing CRLF and boundary dashes
+      value = value.replace(/\r\n--\s*$/, '').replace(/\r\n$/, '');
 
-      const sep = part.indexOf('\r\n\r\n');
-      if (sep === -1) continue;
-      const headerBlock = part.slice(0, sep);
-      let bodyBlock = part.slice(sep + 4);
-
-      // Trim trailing CRLF and boundary endings
-      bodyBlock = bodyBlock.replace(/\r\n--\s*$/, '').replace(/\r\n$/, '');
-
-      const nameMatch = headerBlock.match(/name="([^"]+)"/i);
+      const nameMatch = headers.match(/name="([^"]+)"/i);
       if (!nameMatch) continue;
       const name = nameMatch[1];
-
-      fields[name] = bodyBlock;
+      fields[name] = value;
     }
 
-    // Parse the Jotform JSON if present
+    // Extract rawRequest JSON if present
     let rr = {};
-    try {
-      if (fields.rawRequest) rr = JSON.parse(fields.rawRequest);
-    } catch (e) {
-      fields._rawRequest_parse_error = String(e && e.message || 'parse error');
-    }
+    try { if (fields.rawRequest) rr = JSON.parse(fields.rawRequest); } catch {}
 
-    const formID = (rr && rr.slug && rr.slug.split('/').pop()) || fields.formID;
+    // Try to derive formID from slug `submit/<id>`
+    const formID = rr?.slug?.split("/")?.pop() || fields.formID;
 
     return {
       rawRequest: rr,
@@ -105,36 +58,25 @@ async function readBody(req) {
       fbp: fields.fbp,
       fbc: fields.fbc,
       parentURL: fields.parentURL,
-      fields,
-      _raw: raw,
-      _ct: ct
+      fields // expose all (e.g., q31_fbc, q30_fbp, q32_event_id, etc.)
     };
   }
 
-  // Fallback
-  try {
-    const obj = JSON.parse(raw);
-    obj._raw = raw; obj._ct = ct;
-    return obj;
-  } catch {
-    const obj = parseQS(raw);
-    obj._raw = raw; obj._ct = ct;
-    return obj;
-  }
+  // Fallback attempts
+  try { return JSON.parse(raw); } catch { return parseQS(raw); }
 }
 
-// --- Main handler
 module.exports = async (req, res) => {
   if (req.method === "OPTIONS") return res.status(204).end();
   if (req.method !== "POST") return res.status(405).json({ ok: false, error: "Method not allowed" });
 
   try {
     const body = await readBody(req);
-    dumpWebhook(body, body._ct, body._raw);
 
+    // If multipart from Jotform, answers and values live in body.rawRequest
     const rr = body.rawRequest || {};
 
-    // Helpers
+    // Helper: pick value by exact key or Jotform's qNN_suffix pattern
     function pickCookieLike(obj, key) {
       if (!obj) return undefined;
       for (const k of Object.keys(obj)) {
@@ -146,32 +88,26 @@ module.exports = async (req, res) => {
       return undefined;
     }
 
-    function getAnswerByName(rr, target) {
-      if (!rr || !rr.answers) return undefined;
-      const want = String(target).toLowerCase();
-      for (const a of Object.values(rr.answers)) {
-        const name = a && a.name ? String(a.name).toLowerCase() : '';
-        if (name === want) return (a.answer != null ? a.answer : a.value);
-      }
-      return undefined;
-    }
-
+    // ---- NEW: resolve event_id from all likely places (hidden field + qNN alias)
     function resolveEventId(body, rr) {
       return (
-        getAnswerByName(rr, 'event_id') ||
+        rr.event_id ||                         // e.g. rawRequest.event_id  (present in your dumps)
+        pickCookieLike(rr, 'event_id') ||      // e.g. rawRequest.q32_event_id
         pickCookieLike(body.fields, 'event_id') ||
-        body.event_id || body.eventId ||
+        body.event_id || body.eventId ||       // non-multipart fallbacks
         undefined
       );
     }
 
-    // Collect IDs
+    // Browser IDs from hidden fields or rawRequest; accept qNN_fbp/qNN_fbc too
     let fbp = rr.fbp || body.fbp || pickCookieLike(body.fields, 'fbp') || pickCookieLike(rr, 'fbp');
     let fbc = rr.fbc || body.fbc || pickCookieLike(body.fields, 'fbc') || pickCookieLike(rr, 'fbc');
 
+    // If fbc missing, reconstruct from fbclid in parentURL/referer (common in Jotform payloads)
     if (!fbc) {
       const parentURL = body.parentURL || rr.parentURL || rr.referer || req.headers.referer || "";
       try {
+        // parentURL may be encoded inside another URL (?parentURL=<encoded>)
         const outer = new URL(parentURL, "https://dummy.base");
         const innerCandidate = outer.searchParams.get("parentURL");
         const candidate = innerCandidate ? decodeURIComponent(innerCandidate) : parentURL;
@@ -181,23 +117,30 @@ module.exports = async (req, res) => {
           const ts = Math.floor(Date.now() / 1000);
           fbc = `fb.1.${ts}.${fbclid}`;
         }
-      } catch {}
+      } catch { /* ignore parse errors */ }
     }
 
     // Map your current Jotform field IDs (from your log sample)
     const email      = rr.q27_whatsYour27 || rr.email;
     const first_name = (rr.q24_whatsYour24 && rr.q24_whatsYour24.first) || rr.first_name;
     const last_name  = (rr.q24_whatsYour24 && rr.q24_whatsYour24.last)  || rr.last_name;
+
+    // Two phones: business + personal
     const business_phone = rr.q25_whatsYour25 && rr.q25_whatsYour25.full;
     const personal_phone = rr.q26_whatsYour26 && rr.q26_whatsYour26.full;
     const phones = [business_phone, personal_phone].filter(Boolean);
 
+    // >>> CHANGED: use resolver instead of rr.event_id
     const eventId = resolveEventId(body, rr);
+
+    // Always use a neutral, compliant URL instead of exposing Jotform
     const event_source_url = "https://lyftgrowth.com/go/tsgf/survey/";
     const formId = body.formID || rr.formID;
 
+    // Debug log (view in Vercel → Logs)
     console.log("EventId sources:", {
-      from_answers: getAnswerByName(rr, 'event_id'),
+      rr_event_id: rr.event_id,
+      rr_qNN_event_id: pickCookieLike(rr, 'event_id'),
       fields_event_id: pickCookieLike(body.fields, 'event_id'),
       body_event_id: body.event_id,
       body_eventId: body.eventId,
@@ -226,7 +169,7 @@ module.exports = async (req, res) => {
       data: [{
         event_name: "Lead",
         event_time: now(),
-        event_id: eventId,
+        event_id: eventId, // dedupe id
         action_source: "website",
         event_source_url,
         user_data,
@@ -236,11 +179,12 @@ module.exports = async (req, res) => {
 
     const pixelId = process.env.META_PIXEL_ID;
     const accessToken = process.env.META_ACCESS_TOKEN;
+
     if (!pixelId || !accessToken) {
       return res.status(500).json({ ok: false, error: "Missing META_PIXEL_ID or META_ACCESS_TOKEN env vars" });
     }
 
-    console.log("Using pixel:", { pixelId });
+    console.log("Using pixel:", { pixelId: process.env.META_PIXEL_ID });
     console.log("Payload to Meta:", JSON.stringify(payload, null, 2));
 
     const fb = await fetch(`https://graph.facebook.com/v21.0/${pixelId}/events?access_token=${accessToken}`, {
