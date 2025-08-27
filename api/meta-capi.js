@@ -87,23 +87,6 @@ module.exports = async (req, res) => {
       }
       return undefined;
     }
-
-    // ---- NEW: pull hidden field `event_id` from Jotform's answers map
-function getAnswerByName(rr, target) {
-  if (!rr || !rr.answers) return undefined;
-  const want = String(target).toLowerCase();
-  for (const a of Object.values(rr.answers)) {
-    // Jotform puts name under `name`, value under `answer` (sometimes `value`)
-    const name = (a && a.name ? String(a.name).toLowerCase() : '');
-    if (name === want) {
-      return (a.answer != null ? a.answer : a.value);
-    }
-  }
-  return undefined;
-}
-
-
-
     
 
     // Browser IDs from hidden fields or rawRequest; accept qNN_fbp/qNN_fbc too
@@ -137,24 +120,7 @@ function getAnswerByName(rr, target) {
     const personal_phone = rr.q26_whatsYour26 && rr.q26_whatsYour26.full;
     const phones = [business_phone, personal_phone].filter(Boolean);
 
-    // ✅ CHANGED: prefer hidden field in answers; then try fields/body; NEVER prefer rr.event_id (that's Jotform's internal)
-const eventId =
-  getAnswerByName(rr, 'event_id') ||                   // <— the real hidden field
-  pickCookieLike(body.fields, 'event_id') ||           // if Jotform sent it as a multipart field
-  body.event_id || body.eventId ||                     // urlencoded/json fallbacks
-  undefined;
-
-
-    console.log("EventId sources:", {
-      rr_event_id: rr.event_id,
-      rr_eventId: rr.eventId,
-      fields_event_id: pickCookieLike(body.fields, 'event_id'),
-      fields_eventId: pickCookieLike(body.fields, 'eventId'),
-      body_event_id: body.event_id,
-      body_eventId: body.eventId,
-      resolved: eventId
-    });
-
+    const eventId = rr.event_id;
 
     // Always use a neutral, compliant URL instead of exposing Jotform
     const event_source_url = "https://lyftgrowth.com/go/tsgf/survey/";
