@@ -12,20 +12,59 @@ function sha256(v) {
 }
 const now = () => Math.floor(Date.now() / 1000);
 
+// >>> ADDED: lightweight debug switch + dump helper
+const DEBUG = true;
+function dumpWebhook(body, ct, raw) {
+  if (!DEBUG) return;
+  try {
+    console.log("[WB][content-type]", ct);
+    console.log("[WB][raw first 3000]", (raw || "").slice(0, 3000));
+    console.log("[WB][body keys]", Object.keys(body || {}));
+
+    if (body.fields) {
+      console.log("[WB][fields keys]", Object.keys(body.fields));
+      console.log("[WB][fields.event_id]", body.fields.event_id);
+      console.log("[WB][fields.eventId]", body.fields.eventId);
+    }
+
+    const rr = body.rawRequest || {};
+    console.log("[WB][rawRequest keys]", Object.keys(rr || {}));
+    if (rr.answers) {
+      const names = [];
+      for (const a of Object.values(rr.answers)) {
+        if (a && a.name) names.push(a.name);
+      }
+      console.log("[WB][answers names]", names);
+      const ev = Object.values(rr.answers).find(a => a && a.name === "event_id");
+      console.log("[WB][answers.event_id]", ev ? (ev.answer ?? ev.value) : undefined);
+    }
+  } catch (e) {
+    console.log("[WB][dump error]", e.message);
+  }
+}
+
 // Read any body type: JSON, x-www-form-urlencoded, or multipart/form-data (Jotform)
 async function readBody(req) {
   const chunks = [];
   for await (const ch of req) chunks.push(ch);
   const raw = Buffer.concat(chunks).toString("utf8");
-  const ct = String(req.headers["content-type"] || "");
+  const ct = String(req.headers["content-type"] || "").toLowerCase(); // >>> CHANGED: lowercased
 
-  if (ct.includes("application/json")) return raw ? JSON.parse(raw) : {};
-  if (ct.includes("application/x-www-form-urlencoded")) return parseQS(raw);
+  if (ct.includes("application/json")) {
+    const obj = raw ? JSON.parse(raw) : {};
+    obj._raw = raw; obj._ct = ct; // >>> ADDED
+    return obj;
+  }
+  if (ct.includes("application/x-www-form-urlencoded")) {
+    const obj = parseQS(raw);
+    obj._raw = raw; obj._ct = ct; // >>> ADDED
+    return obj;
+  }
 
   // Robust multipart parser (handles boundaries + extra headers in parts)
   if (ct.includes("multipart/form-data")) {
     const m = ct.match(/boundary=([^;]+)/i);
-    if (!m) return { _multipart: raw }; // no boundary? return raw for debugging
+    if (!m) return { _multipart: raw, _raw: raw, _ct: ct }; // >>> CHANGED: include raw/ct
     const boundary = m[1];
     const parts = raw.split(`--${boundary}`);
 
@@ -58,12 +97,22 @@ async function readBody(req) {
       fbp: fields.fbp,
       fbc: fields.fbc,
       parentURL: fields.parentURL,
-      fields // expose all (e.g., q31_fbc, q30_fbp)
+      fields,               // expose all (e.g., q31_fbc, q30_fbp)
+      _raw: raw,            // >>> ADDED
+      _ct: ct               // >>> ADDED
     };
   }
 
   // Fallback attempts
-  try { return JSON.parse(raw); } catch { return parseQS(raw); }
+  try {
+    const obj = JSON.parse(raw);
+    obj._raw = raw; obj._ct = ct; // >>> ADDED
+    return obj;
+  } catch {
+    const obj = parseQS(raw);
+    obj._raw = raw; obj._ct = ct; // >>> ADDED
+    return obj;
+  }
 }
 
 module.exports = async (req, res) => {
@@ -72,6 +121,9 @@ module.exports = async (req, res) => {
 
   try {
     const body = await readBody(req);
+
+    // >>> ADDED: dump raw + parsed to logs
+    dumpWebhook(body, body._ct, body._raw);
 
     // If multipart from Jotform, answers live in body.rawRequest
     const rr = body.rawRequest || {};
@@ -87,7 +139,27 @@ module.exports = async (req, res) => {
       }
       return undefined;
     }
-    
+
+    // >>> ADDED: pull a field by its Jotform "unique name" from rawRequest.answers
+    function getAnswerByName(rr, target) {
+      if (!rr || !rr.answers) return undefined;
+      const want = String(target).toLowerCase();
+      for (const a of Object.values(rr.answers)) {
+        const name = a && a.name ? String(a.name).toLowerCase() : '';
+        if (name === want) return (a.answer != null ? a.answer : a.value);
+      }
+      return undefined;
+    }
+
+    // >>> ADDED: central resolver for event_id (prefer hidden field; never prefer rr.event_id)
+    function resolveEventId(body, rr) {
+      return (
+        getAnswerByName(rr, 'event_id') ||                     // hidden field inside answers
+        pickCookieLike(body.fields, 'event_id') ||             // multipart fields fallback
+        body.event_id || body.eventId ||                       // urlencoded/json fallbacks
+        undefined
+      );
+    }
 
     // Browser IDs from hidden fields or rawRequest; accept qNN_fbp/qNN_fbc too
     let fbp = rr.fbp || body.fbp || pickCookieLike(body.fields, 'fbp') || pickCookieLike(rr, 'fbp');
@@ -97,7 +169,6 @@ module.exports = async (req, res) => {
     if (!fbc) {
       const parentURL = body.parentURL || rr.parentURL || rr.referer || req.headers.referer || "";
       try {
-        // parentURL may be encoded inside another URL (?parentURL=<encoded>)
         const outer = new URL(parentURL, "https://dummy.base");
         const innerCandidate = outer.searchParams.get("parentURL");
         const candidate = innerCandidate ? decodeURIComponent(innerCandidate) : parentURL;
@@ -120,11 +191,21 @@ module.exports = async (req, res) => {
     const personal_phone = rr.q26_whatsYour26 && rr.q26_whatsYour26.full;
     const phones = [business_phone, personal_phone].filter(Boolean);
 
-    const eventId = rr.event_id;
+    // >>> CHANGED: resolve the correct event_id
+    const eventId = resolveEventId(body, rr);
 
     // Always use a neutral, compliant URL instead of exposing Jotform
     const event_source_url = "https://lyftgrowth.com/go/tsgf/survey/";
     const formId = body.formID || rr.formID;
+
+    // >>> ADDED: source-level debug for event id
+    console.log("EventId sources:", {
+      from_answers: getAnswerByName(rr, 'event_id'),
+      fields_event_id: pickCookieLike(body.fields, 'event_id'),
+      body_event_id: body.event_id,
+      body_eventId: body.eventId,
+      resolved: eventId
+    });
 
     // Debug log (view in Vercel → Logs)
     console.log("Jotform parsed:", {
@@ -146,17 +227,16 @@ module.exports = async (req, res) => {
     Object.keys(user_data).forEach(k => user_data[k] === undefined && delete user_data[k]);
 
     const payload = {
-    data: [{
-      event_name: "Lead",
-      event_time: now(),
-      event_id: eventId, // optional dedupe id
-      action_source: "website",
-      event_source_url,
-      user_data,
-      custom_data: { source: "jotform_webhook" }
+      data: [{
+        event_name: "Lead",
+        event_time: now(),
+        event_id: eventId, // dedupe id
+        action_source: "website",
+        event_source_url,
+        user_data,
+        custom_data: { source: "jotform_webhook" }
       }]
     };
-
 
     const pixelId = process.env.META_PIXEL_ID;
     const accessToken = process.env.META_ACCESS_TOKEN;
@@ -166,7 +246,6 @@ module.exports = async (req, res) => {
     }
 
     console.log("Using pixel:", { pixelId: process.env.META_PIXEL_ID });
-    
     console.log("Payload to Meta:", JSON.stringify(payload, null, 2));
 
     const fb = await fetch(`https://graph.facebook.com/v21.0/${pixelId}/events?access_token=${accessToken}`, {
