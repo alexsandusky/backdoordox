@@ -61,28 +61,72 @@ async function readBody(req) {
     return obj;
   }
 
-  // Robust multipart parser (handles boundaries + extra headers in parts)
+
+  
+    // Robust multipart parser (handles CRLF, optional Content-Type in parts)
   if (ct.includes("multipart/form-data")) {
     const m = ct.match(/boundary=([^;]+)/i);
-    if (!m) return { _multipart: raw, _raw: raw, _ct: ct }; // >>> CHANGED: include raw/ct
+    if (!m) return { _multipart: raw, _raw: raw, _ct: ct };
+
     const boundary = m[1];
     const parts = raw.split(`--${boundary}`);
 
     const fields = {};
     for (const part of parts) {
-      if (!part || part === '--\r\n' || part === '--') continue;
-      const idx = part.indexOf('\r\n\r\n');
-      if (idx === -1) continue;
-      const headers = part.slice(0, idx);
-      let value = part.slice(idx + 4);
-      // Trim trailing CRLF and boundary dashes
-      value = value.replace(/\r\n--\s*$/, '').replace(/\r\n$/, '');
+      // ignore preamble/epilogue
+      if (!part || part === '--\r\n' || part === '--' || part === '\r\n') continue;
 
-      const nameMatch = headers.match(/name="([^"]+)"/i);
+      // Split headers/body
+      const sep = part.indexOf('\r\n\r\n');
+      if (sep === -1) continue;
+      const headerBlock = part.slice(0, sep);
+      let bodyBlock = part.slice(sep + 4);
+
+      // Trim trailing CRLF and trailing boundary hyphens
+      bodyBlock = bodyBlock.replace(/\r\n--\s*$/, '').replace(/\r\n$/, '');
+
+      // Extract "name"
+      const nameMatch = headerBlock.match(/name="([^"]+)"/i);
       if (!nameMatch) continue;
       const name = nameMatch[1];
-      fields[name] = value;
+
+      // If there is a Content-Type header, strip it; keep raw text
+      // (Jotform sends text/plain; charset=UTF-8 sometimes)
+      fields[name] = bodyBlock;
     }
+
+    // Try to parse rawRequest JSON if present
+    let rr = {};
+    try {
+      if (fields.rawRequest) {
+        rr = JSON.parse(fields.rawRequest);
+      }
+    } catch (e) {
+      // keep rr = {}; dump a hint into fields for debugging
+      fields._rawRequest_parse_error = String(e && e.message || 'parse error');
+    }
+
+    const formID = (rr && rr.slug && rr.slug.split('/').pop()) || fields.formID;
+
+    return {
+      rawRequest: rr,
+      formID,
+      fbp: fields.fbp,
+      fbc: fields.fbc,
+      parentURL: fields.parentURL,
+      fields,
+      _raw: raw,
+      _ct: ct
+    };
+  }
+
+
+
+
+
+
+
+  
 
     // Extract rawRequest JSON if present
     let rr = {};
