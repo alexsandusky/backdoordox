@@ -88,6 +88,25 @@ module.exports = async (req, res) => {
       return undefined;
     }
 
+    // ---- NEW: resolve the correct event_id from any payload shape
+    function resolveEventId(body, rr) {
+      // Prefer hidden field from multipart fields (e.g., event_id or qNN_event_id)
+    const fromFields =
+      pickCookieLike(body.fields, 'event_id') ||
+      pickCookieLike(body.fields, 'eventId');
+
+      // Then try rawRequest JSON (some forms put it there)
+    const fromRR = rr.event_id || rr.eventId;
+
+      // Then try top-level body (urlencoded/json)
+    const fromBody = body.event_id || body.eventId;
+
+    return fromFields || fromRR || fromBody || undefined;
+    }
+
+
+    
+
     // Browser IDs from hidden fields or rawRequest; accept qNN_fbp/qNN_fbc too
     let fbp = rr.fbp || body.fbp || pickCookieLike(body.fields, 'fbp') || pickCookieLike(rr, 'fbp');
     let fbc = rr.fbc || body.fbc || pickCookieLike(body.fields, 'fbc') || pickCookieLike(rr, 'fbc');
@@ -119,16 +138,8 @@ module.exports = async (req, res) => {
     const personal_phone = rr.q26_whatsYour26 && rr.q26_whatsYour26.full;
     const phones = [business_phone, personal_phone].filter(Boolean);
 
-    // ✅ CHANGED: prefer your hidden field `event_id` (from rawRequest or fields), then fall back to Jotform's internal eventId
-    const eventId =
-      rr.event_id ||               // from rawRequest (preferred)
-      rr.eventId  ||               // alt casing in rawRequest
-      pickCookieLike(body.fields, 'event_id') ||  // from multipart fields (e.g., qXX_event_id or event_id)
-      pickCookieLike(body.fields, 'eventId')  ||  // alt casing in fields
-      body.event_id ||             // urlencoded/json direct
-      body.eventId    ||           // alt casing direct
-      undefined;
-
+    // ✅ CHANGED: prefer hidden field (fields.event_id), then any other casing/source
+    const eventId = resolveEventId(body, rr);
 
     // Always use a neutral, compliant URL instead of exposing Jotform
     const event_source_url = "https://lyftgrowth.com/go/tsgf/survey/";
