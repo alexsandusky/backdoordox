@@ -119,7 +119,16 @@ module.exports = async (req, res) => {
     const personal_phone = rr.q26_whatsYour26 && rr.q26_whatsYour26.full;
     const phones = [business_phone, personal_phone].filter(Boolean);
 
-    const eventId = rr.event_id;
+    // ✅ CHANGED: prefer your hidden field `event_id` (from rawRequest or fields), then fall back to Jotform's internal eventId
+    const eventId =
+      rr.event_id ||               // from rawRequest (preferred)
+      rr.eventId  ||               // alt casing in rawRequest
+      pickCookieLike(body.fields, 'event_id') ||  // from multipart fields (e.g., qXX_event_id or event_id)
+      pickCookieLike(body.fields, 'eventId')  ||  // alt casing in fields
+      body.event_id ||             // urlencoded/json direct
+      body.eventId    ||           // alt casing direct
+      undefined;
+
 
     // Always use a neutral, compliant URL instead of exposing Jotform
     const event_source_url = "https://lyftgrowth.com/go/tsgf/survey/";
