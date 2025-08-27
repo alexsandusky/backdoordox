@@ -47,7 +47,9 @@ async function readBody(req) {
   const chunks = [];
   for await (const ch of req) chunks.push(ch);
   const raw = Buffer.concat(chunks).toString("utf8");
-  const ct = String(req.headers["content-type"] || "").toLowerCase();
+
+  const ctRaw = String(req.headers["content-type"] || ""); // keep original
+  const ct = ctRaw.toLowerCase();                          // for type checks
 
   if (ct.includes("application/json")) {
     const obj = raw ? JSON.parse(raw) : {};
@@ -61,7 +63,8 @@ async function readBody(req) {
   }
 
   if (ct.includes("multipart/form-data")) {
-    const m = ct.match(/boundary=([^;]+)/i);
+    // IMPORTANT: extract boundary from ORIGINAL header (case-sensitive)
+    const m = ctRaw.match(/boundary=([^;]+)/i);
     if (!m) return { _multipart: raw, _raw: raw, _ct: ct };
 
     const boundary = m[1];
@@ -70,22 +73,26 @@ async function readBody(req) {
     const fields = {};
     for (const part of parts) {
       if (!part || part === '--\r\n' || part === '--' || part === '\r\n') continue;
+
       const sep = part.indexOf('\r\n\r\n');
       if (sep === -1) continue;
       const headerBlock = part.slice(0, sep);
       let bodyBlock = part.slice(sep + 4);
+
+      // Trim trailing CRLF and boundary endings
       bodyBlock = bodyBlock.replace(/\r\n--\s*$/, '').replace(/\r\n$/, '');
+
       const nameMatch = headerBlock.match(/name="([^"]+)"/i);
       if (!nameMatch) continue;
       const name = nameMatch[1];
+
       fields[name] = bodyBlock;
     }
 
+    // Parse the Jotform JSON if present
     let rr = {};
     try {
-      if (fields.rawRequest) {
-        rr = JSON.parse(fields.rawRequest);
-      }
+      if (fields.rawRequest) rr = JSON.parse(fields.rawRequest);
     } catch (e) {
       fields._rawRequest_parse_error = String(e && e.message || 'parse error');
     }
@@ -104,6 +111,7 @@ async function readBody(req) {
     };
   }
 
+  // Fallback
   try {
     const obj = JSON.parse(raw);
     obj._raw = raw; obj._ct = ct;
@@ -176,6 +184,7 @@ module.exports = async (req, res) => {
       } catch {}
     }
 
+    // Map your current Jotform field IDs (from your log sample)
     const email      = rr.q27_whatsYour27 || rr.email;
     const first_name = (rr.q24_whatsYour24 && rr.q24_whatsYour24.first) || rr.first_name;
     const last_name  = (rr.q24_whatsYour24 && rr.q24_whatsYour24.last)  || rr.last_name;
