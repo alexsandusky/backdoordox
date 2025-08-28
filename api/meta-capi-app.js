@@ -1,5 +1,5 @@
 // /api/meta-capi-app.js — Vercel Serverless Function
-// Handles Jotform Smart PDF webhook -> Meta CAPI "Submit Application" event
+// Jotform Smart PDF webhook -> Meta CAPI "Submit Application"
 
 const crypto = require("crypto");
 const { parse: parseQS } = require("querystring");
@@ -11,13 +11,13 @@ function sha256(v) {
 }
 const now = () => Math.floor(Date.now() / 1000);
 
-/** Normalize DOB -> YYYYMMDD for Meta user_data.db */
+// Normalize DOB -> YYYYMMDD
 function normalizeDOB(v) {
   if (!v) return undefined;
   let s = String(v).trim();
-  let m = s.match(/^(\d{4})[-\/](\d{1,2})[-\/](\d{1,2})$/); // YYYY-MM-DD
+  let m = s.match(/^(\d{4})[-\/](\d{1,2})[-\/](\d{1,2})$/);
   if (m) return `${m[1]}${m[2].padStart(2,"0")}${m[3].padStart(2,"0")}`;
-  m = s.match(/^(\d{1,2})[\/\-](\d{1,2})[\/\-](\d{4})$/);   // MM/DD/YYYY
+  m = s.match(/^(\d{1,2})[\/\-](\d{1,2})[\/\-](\d{4})$/);
   if (m) return `${m[3]}${m[1].padStart(2,"0")}${m[2].padStart(2,"0")}`;
   const d = new Date(s);
   if (!isNaN(d.getTime())) {
@@ -29,7 +29,7 @@ function normalizeDOB(v) {
   return undefined;
 }
 
-/** Read body (JSON, urlencoded, multipart) */
+// Read body (JSON, urlencoded, multipart)
 async function readBody(req) {
   const chunks = [];
   for await (const ch of req) chunks.push(ch);
@@ -64,7 +64,7 @@ async function readBody(req) {
   try { return JSON.parse(raw); } catch { return parseQS(raw); }
 }
 
-/** Accept exact key or "..._<key>" suffix (e.g., q32_event_id) */
+// Accept exact key or "..._<key>" suffix
 function pickCookieLike(obj, key) {
   if (!obj) return undefined;
   for (const k of Object.keys(obj)) {
@@ -76,7 +76,47 @@ function pickCookieLike(obj, key) {
   return undefined;
 }
 
-/** Prefer hidden/browser event_id over Jotform internal rr.event_id */
+// Extract from rr.answers by unique name (Smart PDF)
+function jfAnswer(rr, unique) {
+  const answers = rr && rr.answers ? rr.answers : undefined;
+  if (!answers || typeof answers !== 'object') return undefined;
+
+  for (const k of Object.keys(answers)) {
+    const a = answers[k];
+    // Jotform variants: a.name, a.key, a.text; value may be in a.answer or a.value
+    const nm = a?.name || a?.key;
+    if (nm !== unique) continue;
+
+    const val = a?.answer ?? a?.value ?? a?.valueText ?? a?.pretty ?? a?.text ?? a;
+    if (val == null) return undefined;
+
+    // normalize shapes
+    if (typeof val === 'string') return val.trim();
+
+    if (typeof val === 'object') {
+      // name objects: {first,last} or {firstName,lastName}
+      if (val.first || val.last) {
+        const first = String(val.first || val.firstName || '').trim();
+        const last  = String(val.last || val.lastName || '').trim();
+        return { first, last };
+      }
+      // phone objects: {full, phone, area, number}
+      if (val.full || val.phone) {
+        return String(val.full || val.phone || '').trim();
+      }
+      // date objects: {year, month, day}
+      if (val.year && val.month && val.day) {
+        const y = String(val.year).padStart(4,'0');
+        const m = String(val.month).padStart(2,'0');
+        const d = String(val.day).padStart(2,'0');
+        return `${y}-${m}-${d}`;
+      }
+    }
+  }
+  return undefined;
+}
+
+// Prefer hidden/browser event_id over Jotform internal rr.event_id
 function resolveEventId(body, rr) {
   const hidden =
     pickCookieLike(rr, 'event_id') ||
@@ -86,15 +126,20 @@ function resolveEventId(body, rr) {
   return hidden || internal || undefined;
 }
 
-/** Split a full name into first/last */
-function splitName(full) {
-  if (!full || typeof full !== 'string') return { first: undefined, last: undefined };
-  const parts = full.trim().split(/\s+/);
-  if (parts.length === 1) return { first: parts[0], last: undefined };
-  return { first: parts[0], last: parts.slice(1).join(' ') };
+function splitNameFromAny(v) {
+  if (!v) return { first: undefined, last: undefined };
+  if (typeof v === 'object') {
+    return { first: v.first || undefined, last: v.last || undefined };
+  }
+  if (typeof v === 'string') {
+    const parts = v.trim().split(/\s+/);
+    if (parts.length === 1) return { first: parts[0], last: undefined };
+    return { first: parts[0], last: parts.slice(1).join(' ') };
+  }
+  return { first: undefined, last: undefined };
 }
 
-/** Rebuild _fbc from fbclid in referer if missing */
+// Rebuild _fbc from fbclid in referer if missing
 function reconstructFBCIfNeeded(currentFbc, body, rr, req) {
   if (currentFbc) return currentFbc;
   const parentURL = body.parentURL || rr.parentURL || req.headers.referer || "";
@@ -134,14 +179,88 @@ module.exports = async (req, res) => {
       if (v) clickIds[k] = v;
     }
 
-    // --- Applicant fields
-    const fullName = fields.name ?? rr.name ?? pickCookieLike(fields, 'name') ?? pickCookieLike(rr, 'name');
-    const { first: first_name, last: last_name } = splitName(fullName);
+    // --- Applicant fields (robust Smart PDF scan)
+function jfScan(rr) {
+  const out = { name: undefined, email: undefined, phone: undefined, dob: undefined };
+  const answers = rr && rr.answers ? rr.answers : undefined;
+  if (!answers) return out;
 
-    const email = fields.email ?? rr.email ?? pickCookieLike(fields, 'email') ?? pickCookieLike(rr, 'email');
-    const phone = fields.mobile18 ?? rr.mobile18 ?? pickCookieLike(fields, 'mobile18') ?? pickCookieLike(rr, 'mobile18');
-    const dobRaw = fields.dateOf ?? rr.dateOf ?? pickCookieLike(fields, 'dateOf') ?? pickCookieLike(rr, 'dateOf');
-    const db = normalizeDOB(dobRaw);
+  const isEmail = v => typeof v === 'string' && /^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(v.trim());
+  const normPhone = v => {
+    if (!v) return undefined;
+    const s = typeof v === 'string' ? v : (v.full || v.phone || '');
+    if (!s) return undefined;
+    const keep = s.replace(/[^\d+]/g, '');
+    return keep.length >= 7 ? keep : undefined;
+  };
+  const asString = v => typeof v === 'string' ? v.trim() : undefined;
+
+  for (const k of Object.keys(answers)) {
+    const a = answers[k];
+    const nm = (a?.name || a?.key || '').toString().toLowerCase();
+    const val = a?.answer ?? a?.value ?? a?.valueText ?? a?.pretty ?? a?.text ?? a;
+
+    if (!out.email) {
+      const e = isEmail(asString(val)) ? asString(val)
+        : (typeof val === 'object' && isEmail(val?.email) ? val.email : undefined);
+      if (e) out.email = e;
+      else if (/(^|[^a-z])email([^a-z]|$)/i.test(nm) && asString(val)) out.email = asString(val);
+    }
+
+    if (!out.phone) {
+      const p = normPhone(val);
+      if (p) out.phone = p;
+      else if (/(phone|mobile|cell|tel)/i.test(nm) && asString(val)) {
+        const p2 = normPhone(asString(val));
+        if (p2) out.phone = p2;
+      }
+    }
+
+    if (!out.dob) {
+      if (val && typeof val === 'object' && val.year && val.month && val.day) {
+        out.dob = `${String(val.year).padStart(4,'0')}-${String(val.month).padStart(2,'0')}-${String(val.day).padStart(2,'0')}`;
+      } else {
+        const s = asString(val);
+        if (s && /(\d{4}[-/]\d{1,2}[-/]\d{1,2})|(\d{1,2}[-/]\d{1,2}[-/]\d{4})/.test(s)) out.dob = s;
+        else if (/(dob|birth|dateof|date_of|date-of)/i.test(nm) && s) out.dob = s;
+      }
+    }
+
+    if (!out.name) {
+      if (val && typeof val === 'object' && (val.first || val.last || val.firstName || val.lastName)) {
+        out.name = { first: val.first || val.firstName || '', last: val.last || val.lastName || '' };
+      } else {
+        const s = asString(val);
+        if (s && /(name|applicant)/i.test(nm)) out.name = s;
+      }
+    }
+  }
+  return out;
+}
+
+const scanned = jfScan(rr);
+const { first: first_name, last: last_name } = (() => {
+  if (!scanned.name) return { first: undefined, last: undefined };
+  if (typeof scanned.name === 'object') return { first: scanned.name.first || undefined, last: scanned.name.last || undefined };
+  const parts = String(scanned.name).trim().split(/\s+/);
+  return parts.length > 1 ? { first: parts[0], last: parts.slice(1).join(' ') } : { first: parts[0], last: undefined };
+})();
+
+const email = scanned.email;
+let phone  = scanned.phone;
+if (phone) phone = phone.replace(/[^\d+]/g, '');
+const db = normalizeDOB(scanned.dob);
+
+console.log('[CAPI:APP] Detect:', {
+  got_first: Boolean(first_name),
+  got_last: Boolean(last_name),
+  got_email: Boolean(email),
+  got_phone: Boolean(phone),
+  got_db: Boolean(db),
+  answers_present: Boolean(rr && rr.answers),
+  answer_keys: rr && rr.answers ? Object.keys(rr.answers) : []
+});
+
 
     // Dedupe id
     const eventId = resolveEventId(body, rr);
@@ -170,7 +289,7 @@ module.exports = async (req, res) => {
         event_time: now(),
         event_id: eventId,
         action_source: "website",
-        event_source_url: "https://lyftgrowth.com/go/tsgf/application/", // static masking URL
+        event_source_url: "https://lyftgrowth.com/go/tsgf/application/",
         user_data,
         custom_data
       }]
@@ -184,13 +303,21 @@ module.exports = async (req, res) => {
       return res.status(500).json({ ok: false, error: "Missing META_PIXEL_ID or META_ACCESS_TOKEN" });
     }
 
+    // Debug: show what we extracted (non-PII)
     console.log("[CAPI:APP] Parsed submission:", {
       eventId,
       have_fbp: Boolean(fbp),
       have_fbc: Boolean(fbc),
+      got_first: Boolean(first_name),
+      got_last: Boolean(last_name),
+      got_email: Boolean(email),
+      got_phone: Boolean(phone),
+      got_db: Boolean(db),
       utms,
       clickIds,
-      fieldKeys: Object.keys(fields || {})
+      // helpful to confirm Smart PDF answers presence
+      has_answers: Boolean(rr && rr.answers),
+      answer_keys: rr && rr.answers ? Object.keys(rr.answers) : []
     });
 
     // Build request URL
