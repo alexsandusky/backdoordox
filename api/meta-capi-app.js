@@ -358,6 +358,9 @@ console.log('[CAPI:APP] Detect:', {
     url.searchParams.set("access_token", accessToken);
     if (testEventCode) url.searchParams.set("test_event_code", testEventCode);
 
+    console.log('[CAPI:APP] Graph URL:', url.toString());
+
+    
     // Send to Meta
     const graphResp = await fetch(url.toString(), {
       method: "POST",
