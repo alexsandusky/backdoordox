@@ -185,19 +185,28 @@ module.exports = async (req, res) => {
     };
 
 
-// inside handler, after building `payload`
-const testEventCode =
-  fields.meta_test_event_code || rr.meta_test_event_code || undefined;
+// after building `payload` and checking pixelId/accessToken
+const testEventCode = process.env.META_TEST_EVENT_CODE; // e.g., TEST98062
 
+// Static masking URL (you already wanted this)
+const event_source_url = "https://lyftgrowth.com/go/tsgf/application/";
+payload.data[0].event_source_url = event_source_url;
+
+// Build Graph API URL with optional test_event_code
 const url = new URL(`https://graph.facebook.com/v21.0/${pixelId}/events`);
-url.searchParams.set('access_token', accessToken);
-if (testEventCode) url.searchParams.set('test_event_code', testEventCode);
+url.searchParams.set("access_token", accessToken);
+if (testEventCode) url.searchParams.set("test_event_code", testEventCode);
 
-const fb = await fetch(url.toString(), {
+// Send
+const graphResp = await fetch(url.toString(), {
   method: "POST",
   headers: { "Content-Type": "application/json" },
   body: JSON.stringify(payload)
 });
+const json = await graphResp.json();
+console.log("[CAPI:APP] Meta response:", json);
+return res.status(graphResp.ok ? 200 : 500).json({ ok: graphResp.ok, meta: json });
+
 
 
     
