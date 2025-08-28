@@ -152,7 +152,7 @@ module.exports = async (req, res) => {
     const eventId = resolveEventId(body, rr);
 
     // Neutral source URL
-    const event_source_url = rr.event_source_url || fields.event_source_url || "https://lyftgrowth.com/go/app/";
+    const event_source_url = "https://lyftgrowth.com/go/tsgf/application/";
     const formId = body.formID || rr.formID;
 
     // user_data (hash PII)
