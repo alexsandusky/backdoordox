@@ -179,66 +179,92 @@ module.exports = async (req, res) => {
       if (v) clickIds[k] = v;
     }
 
-    // --- Applicant fields (robust Smart PDF scan)
-function jfScan(rr) {
+
+
+    
+// ---- Robust Smart PDF extraction across rr.answers *and* rr root qNN_* ----
+function extractApplicant(rr) {
   const out = { name: undefined, email: undefined, phone: undefined, dob: undefined };
-  const answers = rr && rr.answers ? rr.answers : undefined;
-  if (!answers) return out;
 
   const isEmail = v => typeof v === 'string' && /^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(v.trim());
+  const asString = v => typeof v === 'string' ? v.trim() : undefined;
   const normPhone = v => {
     if (!v) return undefined;
-    const s = typeof v === 'string' ? v : (v.full || v.phone || '');
+    const s = typeof v === 'string' ? v : (v.full || v.phone || v.number || '');
     if (!s) return undefined;
     const keep = s.replace(/[^\d+]/g, '');
     return keep.length >= 7 ? keep : undefined;
   };
-  const asString = v => typeof v === 'string' ? v.trim() : undefined;
 
-  for (const k of Object.keys(answers)) {
-    const a = answers[k];
-    const nm = (a?.name || a?.key || '').toString().toLowerCase();
-    const val = a?.answer ?? a?.value ?? a?.valueText ?? a?.pretty ?? a?.text ?? a;
-
-    if (!out.email) {
-      const e = isEmail(asString(val)) ? asString(val)
-        : (typeof val === 'object' && isEmail(val?.email) ? val.email : undefined);
-      if (e) out.email = e;
-      else if (/(^|[^a-z])email([^a-z]|$)/i.test(nm) && asString(val)) out.email = asString(val);
+  // helpers that try to pull values from a generic "answer-like" object
+  function readGeneric(val, keyHint = '') {
+    // name objects
+    if (val && typeof val === 'object' && (val.first || val.last || val.firstName || val.lastName)) {
+      return { type: 'name', value: { first: val.first || val.firstName || '', last: val.last || val.lastName || '' } };
     }
-
-    if (!out.phone) {
-      const p = normPhone(val);
-      if (p) out.phone = p;
-      else if (/(phone|mobile|cell|tel)/i.test(nm) && asString(val)) {
-        const p2 = normPhone(asString(val));
-        if (p2) out.phone = p2;
-      }
+    // date objects
+    if (val && typeof val === 'object' && (val.year && val.month && val.day)) {
+      const y = String(val.year).padStart(4,'0');
+      const m = String(val.month).padStart(2,'0');
+      const d = String(val.day).padStart(2,'0');
+      return { type: 'dob', value: `${y}-${m}-${d}` };
     }
+    // phone objects
+    const pObj = val && typeof val === 'object' && (val.full || val.phone || val.number) ? normPhone(val) : undefined;
+    if (pObj) return { type: 'phone', value: pObj };
 
-    if (!out.dob) {
-      if (val && typeof val === 'object' && val.year && val.month && val.day) {
-        out.dob = `${String(val.year).padStart(4,'0')}-${String(val.month).padStart(2,'0')}-${String(val.day).padStart(2,'0')}`;
-      } else {
-        const s = asString(val);
-        if (s && /(\d{4}[-/]\d{1,2}[-/]\d{1,2})|(\d{1,2}[-/]\d{1,2}[-/]\d{4})/.test(s)) out.dob = s;
-        else if (/(dob|birth|dateof|date_of|date-of)/i.test(nm) && s) out.dob = s;
+    // strings
+    const s = asString(val);
+    if (s) {
+      if (isEmail(s) || /(^|[^a-z])email([^a-z]|$)/i.test(keyHint)) return { type: 'email', value: s };
+      if (/(phone|mobile|cell|tel)/i.test(keyHint)) {
+        const p = normPhone(s); if (p) return { type: 'phone', value: p };
       }
+      if (/(\d{4}[-/]\d{1,2}[-/]\d{1,2})|(\d{1,2}[-/]\d{1,2}[-/]\d{4})/.test(s) ||
+          /(dob|birth|dateof|date_of|date-of)/i.test(keyHint)) return { type: 'dob', value: s };
+      if (/(name|applicant)/i.test(keyHint)) return { type: 'name', value: s };
     }
+    return null;
+  }
 
-    if (!out.name) {
-      if (val && typeof val === 'object' && (val.first || val.last || val.firstName || val.lastName)) {
-        out.name = { first: val.first || val.firstName || '', last: val.last || val.lastName || '' };
-      } else {
-        const s = asString(val);
-        if (s && /(name|applicant)/i.test(nm)) out.name = s;
-      }
+  function maybeSet(kind, value) {
+    if (kind === 'email' && !out.email) out.email = value;
+    if (kind === 'phone' && !out.phone) out.phone = value;
+    if (kind === 'dob' && !out.dob) out.dob = value;
+    if (kind === 'name' && !out.name) out.name = value;
+  }
+
+  // 1) Scan rr.answers if present
+  if (rr && rr.answers && typeof rr.answers === 'object') {
+    for (const k of Object.keys(rr.answers)) {
+      const a = rr.answers[k];
+      const nm = (a?.name || a?.key || '').toString().toLowerCase();
+      const val = a?.answer ?? a?.value ?? a?.valueText ?? a?.pretty ?? a?.text ?? a;
+      const got = readGeneric(val, nm);
+      if (got) maybeSet(got.type, got.value);
     }
   }
+
+  // 2) Scan top-level rr (qNN_* keys etc.)
+  if (rr && typeof rr === 'object') {
+    for (const k of Object.keys(rr)) {
+      // Skip known meta keys (utm, fb cookies, tracker, etc.)
+      if (/^(slug|upload|jsExecutionTracker|submit|build|validated|path|timeToSubmit)$/i.test(k)) continue;
+      if (/^(q\d+_utm|utm_|q\d+_fbc|q\d+_fbp|fbp|fbc|event_id)$/i.test(k)) continue;
+
+      const v = rr[k];
+      const got = readGeneric(v, k.toLowerCase());
+      if (got) maybeSet(got.type, got.value);
+    }
+  }
+
   return out;
 }
 
-const scanned = jfScan(rr);
+// Use the extractor
+const scanned = extractApplicant(rr);
+
+// Convert to final fields
 const { first: first_name, last: last_name } = (() => {
   if (!scanned.name) return { first: undefined, last: undefined };
   if (typeof scanned.name === 'object') return { first: scanned.name.first || undefined, last: scanned.name.last || undefined };
@@ -251,15 +277,22 @@ let phone  = scanned.phone;
 if (phone) phone = phone.replace(/[^\d+]/g, '');
 const db = normalizeDOB(scanned.dob);
 
+// Debug (non-PII)
 console.log('[CAPI:APP] Detect:', {
   got_first: Boolean(first_name),
   got_last: Boolean(last_name),
   got_email: Boolean(email),
   got_phone: Boolean(phone),
   got_db: Boolean(db),
-  answers_present: Boolean(rr && rr.answers),
+  rr_keys: rr ? Object.keys(rr).length : 0,
+  has_answers: Boolean(rr && rr.answers),
   answer_keys: rr && rr.answers ? Object.keys(rr.answers) : []
 });
+
+
+
+
+    
 
 
     // Dedupe id
