@@ -184,6 +184,25 @@ module.exports = async (req, res) => {
       }]
     };
 
+
+// inside handler, after building `payload`
+const testEventCode =
+  fields.meta_test_event_code || rr.meta_test_event_code || undefined;
+
+const url = new URL(`https://graph.facebook.com/v21.0/${pixelId}/events`);
+url.searchParams.set('access_token', accessToken);
+if (testEventCode) url.searchParams.set('test_event_code', testEventCode);
+
+const fb = await fetch(url.toString(), {
+  method: "POST",
+  headers: { "Content-Type": "application/json" },
+  body: JSON.stringify(payload)
+});
+
+
+    
+
+    
     const pixelId = process.env.META_PIXEL_ID;
     const accessToken = process.env.META_ACCESS_TOKEN;
     if (!pixelId || !accessToken) {
