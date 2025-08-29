@@ -318,7 +318,7 @@ console.log('[CAPI:APP] Detect:', {
     // Build payload
     const payload = {
       data: [{
-        event_name: "Submit Application",
+        event_name: "SubmitApplication",  // was "Submit Application"
         event_time: now(),
         event_id: eventId,
         action_source: "website",
