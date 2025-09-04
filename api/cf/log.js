@@ -1,26 +1,23 @@
-// /api/cf/log.js
+// CommonJS; tolerant to any method/body/content-type
 module.exports = async (req, res) => {
-  // 1) Always 200 for non-POST (CF "Save Webhook" probes can be GET/HEAD/OPTIONS)
-  if (req.method !== 'POST') {
-    res.setHeader('Content-Type', 'text/plain');
-    return res.status(200).send('ok');
-  }
+  // allow CF "save" probes of any kind
+  if (req.method !== 'POST') return res.status(200).send('ok');
 
-  // 2) For POST: stream raw body (works for JSON or form-encoded)
+  // read raw body (handles JSON or form-encoded)
   let raw = '';
-  try {
-    for await (const chunk of req) raw += chunk;
-  } catch (e) {
-    // ignore
+  for await (const chunk of req) raw += chunk;
+
+  // try to parse JSON; if not, try urlencoded; else keep raw
+  let payload = raw;
+  try { payload = JSON.parse(raw); }
+  catch {
+    try {
+      const p = new URLSearchParams(raw); 
+      payload = Object.fromEntries(p.entries());
+    } catch {}
   }
 
-  // Try JSON parse; if fails, keep raw text
-  let payload = raw;
-  try { payload = JSON.parse(raw); } catch (_) {}
-
-  console.log('CF WEBHOOK HEADERS:', req.headers);
-  console.log('CF WEBHOOK BODY:', payload);
-
-  // 3) Respond fast
+  console.log('CF HEADERS:', req.headers);
+  console.log('CF BODY:', payload);
   res.status(200).json({ ok: true });
 };
