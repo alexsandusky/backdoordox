@@ -1,21 +1,26 @@
 // /api/cf/log.js
-export default function handler(req, res) {
-  if (req.method === 'GET') {
-    // Respond to ClickFunnels "Save Webhook" test (could be GET request)
-    return res.status(200).send('OK');  // simple confirmation response
+module.exports = async (req, res) => {
+  // 1) Always 200 for non-POST (CF "Save Webhook" probes can be GET/HEAD/OPTIONS)
+  if (req.method !== 'POST') {
+    res.setHeader('Content-Type', 'text/plain');
+    return res.status(200).send('ok');
   }
-  if (req.method === 'HEAD') {
-    // Respond to HEAD requests with no body
-    return res.status(200).end();
+
+  // 2) For POST: stream raw body (works for JSON or form-encoded)
+  let raw = '';
+  try {
+    for await (const chunk of req) raw += chunk;
+  } catch (e) {
+    // ignore
   }
-  if (req.method === 'POST') {
-    // Handle the actual webhook payload
-    const payload = req.body;  // Vercel parses JSON body automatically:contentReference[oaicite:2]{index=2}
-    console.log('ClickFunnels webhook payload:', payload);
-    // TODO: add your processing logic here (e.g., save to database)
-    return res.status(200).json({ received: true });
-  }
-  // For any other HTTP methods, return 405 Method Not Allowed
-  res.setHeader('Allow', ['GET','HEAD','POST']);
-  res.status(405).end(`Method ${req.method} Not Allowed`);
-}
+
+  // Try JSON parse; if fails, keep raw text
+  let payload = raw;
+  try { payload = JSON.parse(raw); } catch (_) {}
+
+  console.log('CF WEBHOOK HEADERS:', req.headers);
+  console.log('CF WEBHOOK BODY:', payload);
+
+  // 3) Respond fast
+  res.status(200).json({ ok: true });
+};
