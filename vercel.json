@@ -1,5 +1,0 @@
-{
-  "edge_functions": [
-    { "path": "/cf/log", "entrypoint": "cf/log.js" }
-  ]
-}
