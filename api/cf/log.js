@@ -1,14 +1,14 @@
 // /api/cf/log.js
-export default async function handler(req, res) {
-  // Allow everything CF might send during “Save Webhook”
+module.exports = async (req, res) => {
+  // accept anything CF sends during "Save"
   if (req.method !== 'POST') {
     res.setHeader('Content-Type', 'text/plain');
     return res.status(200).send('ok');
   }
-
-  // Real event POSTs
-  const body = typeof req.body === 'string' ? req.body : JSON.stringify(req.body || {});
+  // real webhook POSTs
+  let raw = '';
+  try { raw = typeof req.body === 'string' ? req.body : JSON.stringify(req.body || {}); } catch {}
   console.log('CF HEADERS:', req.headers);
-  console.log('CF BODY:', body);
+  console.log('CF BODY:', raw);
   return res.status(200).json({ ok: true });
-}
+};
