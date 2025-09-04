@@ -1,8 +1,5 @@
 {
-  "functions": {
-    "api/**/*.js": { "runtime": "nodejs20.x" }
-  },
-  "routes": [
-    { "src": "^/api/.*", "dest": "/api/cf/log.js", "methods": ["GET","HEAD","POST","OPTIONS"] }
+  "edge_functions": [
+    { "path": "/cf/log", "entrypoint": "cf/log.js" }
   ]
 }
