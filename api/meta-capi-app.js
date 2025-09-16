@@ -313,16 +313,16 @@ console.log('[CAPI:APP] Detect:', {
     Object.keys(user_data).forEach(k => user_data[k] === undefined && delete user_data[k]);
 
     // custom_data
-    const custom_data = { source: "jotform_webhook_app", ...utms, ...clickIds };
+    const custom_data = { source: "jotform_webhook_app" };
 
     // Build payload
     const payload = {
       data: [{
-        event_name: "SubmitApplication",  // was "Submit Application"
+        event_name: "SubmitApplication", 
         event_time: now(),
         event_id: eventId,
         action_source: "website",
-        event_source_url: "https://lyftgrowth.com/go/tsgf/application/",
+        event_source_url: "https://go.lyftcapital.com/application",
         user_data,
         custom_data
       }]
